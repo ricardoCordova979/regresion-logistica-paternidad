@@ -10,9 +10,9 @@
 ![Licencia](https://img.shields.io/badge/licencia-MIT-lightgrey)
 
 **[Ver el proyecto publicado](https://ricardocordova979.github.io/regresion-logistica-paternidad/)** ·
-[Informe en R](https://ricardocordova979.github.io/regresion-logistica-paternidad/docs/informe-r.html) ·
-[Informe en Python](https://ricardocordova979.github.io/regresion-logistica-paternidad/docs/informe-python.html) ·
-[Verificación R vs. Python](https://ricardocordova979.github.io/regresion-logistica-paternidad/docs/verificacion.html)
+[Informe en R](https://ricardocordova979.github.io/regresion-logistica-paternidad/informe-r.html) ·
+[Informe en Python](https://ricardocordova979.github.io/regresion-logistica-paternidad/informe-python.html) ·
+[Verificación R vs. Python](https://ricardocordova979.github.io/regresion-logistica-paternidad/verificacion.html)
 
 Modelo de clasificación que estima la probabilidad de que una persona tenga hijos a partir de su perfil
 sociodemográfico, con datos de 2,035 personas de la *General Social Survey* (EE. UU.). Desarrollado en **R** y
