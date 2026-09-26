@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Qué predice que una persona tenga hijos · Regresión logística en R y Python · Ricardo Córdova</title>
+<meta name="description" content="Modelo de clasificación con regresión logística y regularización (LASSO, Ridge, Elastic Net) sobre 2,035 personas de la General Social Survey, implementado en R y replicado en Python.">
+<meta property="og:title" content="Qué predice que una persona tenga hijos">
+<meta property="og:description" content="Regresión logística y regularización en R y Python · AUC 0.81 · replicación verificada en 51,860 valores.">
+<meta property="og:image" content="https://ricardocordova979.github.io/regresion-logistica-paternidad/img/portada.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👪</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --fondo: #F3F5F7;
+    --superficie: #FFFFFF;
+    --tinta: #16212B;
+    --tenue: #5B6B78;
+    --linea: #D5DCE2;
+    --marino: #1F4E79;
+    --naranja: #C55A11;
+    --sans: "IBM Plex Sans", "Segoe UI", Roboto, Arial, sans-serif;
+    --cond: "IBM Plex Sans Condensed", "Arial Narrow", "IBM Plex Sans", sans-serif;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body {
+    margin: 0; background: var(--fondo); color: var(--tinta);
+    font-family: var(--sans); font-size: 17px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--marino); text-underline-offset: 3px; }
+  a:focus-visible, .boton:focus-visible { outline: 3px solid var(--naranja); outline-offset: 3px; }
+  img { max-width: 100%; height: auto; display: block; }
+  .envoltura { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+
+  /* Barra superior */
+  .barra { display: flex; justify-content: space-between; align-items: center; padding: 22px 0; font-size: 15px; }
+  .barra .autor { font-weight: 600; color: var(--tinta); text-decoration: none; }
+  .barra nav a { margin-left: 22px; color: var(--tenue); text-decoration: none; }
+  .barra nav a:hover { color: var(--marino); }
+
+  /* Portada */
+  .portada { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 48px; align-items: center; padding: 28px 0 64px; }
+  .portada h1 {
+    font-family: var(--cond); font-weight: 600; font-size: clamp(40px, 5.6vw, 68px);
+    line-height: 1.02; letter-spacing: -0.015em; margin: 0 0 24px; max-width: 15ch;
+  }
+  .entradilla { font-size: 19px; color: #33424F; max-width: 34em; margin: 0 0 28px; }
+  .datos { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 0 0 32px; padding: 0; list-style: none; font-size: 15px; color: var(--tenue); }
+  .datos strong { color: var(--tinta); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .acciones { display: flex; flex-wrap: wrap; gap: 12px; }
+  .boton {
+    display: inline-block; padding: 13px 22px; border-radius: 4px; font-weight: 600; font-size: 16px;
+    text-decoration: none; border: 2px solid var(--marino);
+  }
+  .boton.principal { background: var(--marino); color: #fff; }
+  .boton.principal:hover { background: #173C5E; border-color: #173C5E; }
+  .boton.secundario { color: var(--marino); background: transparent; }
+  .boton.secundario:hover { background: #E4EAF0; }
+
+  .mapa { margin: 0; position: relative; }
+  .mapa img { width: 100%; max-width: 500px; margin-left: auto; }
+  .mapa figcaption { font-size: 14px; color: var(--tenue); max-width: 470px; margin: 12px 0 0 auto; }
+  .escala { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .escala img { width: 160px; height: 10px; border-radius: 2px; }
+
+  /* Secciones */
+  section { padding: 64px 0; border-top: 1px solid var(--linea); }
+  h2 { font-family: var(--cond); font-weight: 600; font-size: clamp(30px, 3.4vw, 40px); line-height: 1.1; margin: 0 0 14px; letter-spacing: -0.01em; }
+  .intro { color: #33424F; max-width: 40em; margin: 0 0 36px; }
+
+  /* Efectos del precio */
+  .efectos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin: 0; }
+  .efecto { padding: 4px 32px 4px 0; }
+  .efecto + .efecto { padding-left: 32px; border-left: 1px solid var(--linea); }
+  .efecto dt { font-family: var(--cond); font-weight: 600; font-size: clamp(34px, 4vw, 48px); line-height: 1; color: var(--marino); font-variant-numeric: tabular-nums; margin-bottom: 10px; }
+  .efecto dd { margin: 0; color: #33424F; font-size: 16px; }
+  .nota { font-size: 14px; color: var(--tenue); margin-top: 28px; max-width: 46em; }
+
+  /* Tabla de modelos */
+  .tabla-contenedor { overflow-x: auto; background: var(--superficie); border: 1px solid var(--linea); border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; font-size: 16px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 14px 18px; text-align: right; border-bottom: 1px solid var(--linea); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  thead th { font-size: 14px; font-weight: 600; color: var(--tenue); background: #F8FAFB; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.recomendado td { background: #FBF1EA; }
+  tr.recomendado td:first-child { box-shadow: inset 4px 0 0 var(--naranja); font-weight: 600; }
+  .etiqueta { display: inline-block; margin-left: 8px; font-size: 13px; font-weight: 500; color: var(--naranja); }
+
+  /* Diagnóstico */
+  .dos-columnas { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; }
+  .dos-columnas p { margin: 0 0 16px; color: #33424F; }
+
+  /* Proceso */
+  .pasos { list-style: none; counter-reset: paso; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px 40px; }
+  .pasos li { counter-increment: paso; position: relative; padding-top: 44px; }
+  .pasos li::before {
+    content: counter(paso); position: absolute; top: 0; left: 0; font-family: var(--cond); font-weight: 600;
+    font-size: 26px; color: var(--naranja); line-height: 1;
+  }
+  .pasos h3 { font-size: 17px; margin: 0 0 6px; }
+  .pasos p { margin: 0; font-size: 15.5px; color: #33424F; }
+
+  /* Replicación */
+  .replica { background: var(--marino); color: #fff; border-top: 0; }
+  .replica h2 { color: #fff; }
+  .replica .intro { color: #D4E0EB; }
+  .replica a { color: #fff; }
+  .cifras-replica { display: flex; flex-wrap: wrap; gap: 20px 56px; margin: 0 0 32px; }
+  .cifras-replica div { font-size: 15px; color: #D4E0EB; }
+  .cifras-replica strong { display: block; font-family: var(--cond); font-weight: 600; font-size: 44px; color: #fff; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  .replica .boton.secundario { color: #fff; border-color: #fff; }
+  .replica .boton.secundario:hover { background: rgba(255,255,255,.12); }
+
+  /* Documentos */
+  .documentos { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 48px; margin: 0; padding: 0; list-style: none; }
+  .documentos li { padding: 18px 0; border-bottom: 1px solid var(--linea); display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .documentos a { font-weight: 600; text-decoration: none; }
+  .documentos a:hover { text-decoration: underline; }
+  .documentos span { font-size: 14px; color: var(--tenue); text-align: right; }
+
+  footer { padding: 40px 0 56px; font-size: 14px; color: var(--tenue); border-top: 1px solid var(--linea); }
+  footer p { margin: 0 0 6px; }
+
+  @media (max-width: 860px) {
+    .portada, .dos-columnas { grid-template-columns: 1fr; gap: 36px; }
+    .mapa img, .mapa figcaption { margin-left: 0; }
+    .efectos { grid-template-columns: 1fr; }
+    .efecto, .efecto + .efecto { padding: 20px 0; border-left: 0; }
+    .efecto + .efecto { border-top: 1px solid var(--linea); }
+    .pasos { grid-template-columns: 1fr 1fr; }
+    .documentos { grid-template-columns: 1fr; }
+    .barra nav { display: none; }
+  }
+  @media (max-width: 520px) {
+    body { font-size: 16px; }
+    .envoltura { padding: 0 20px; }
+    .pasos { grid-template-columns: 1fr; }
+    section { padding: 48px 0; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .mapa img { animation: aparecer 900ms ease-out both; }
+    @keyframes aparecer { from { opacity: 0; transform: scale(.985); } to { opacity: 1; transform: none; } }
+  }
+  .tabla-contenedor + .nota { margin-top: 20px; }
+  .roc { max-width: 380px; }
+  .modelo-grid { display: grid; grid-template-columns: 1fr 380px; gap: 40px; align-items: center; }
+  @media (max-width: 860px) { .modelo-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="envoltura">
+  <header class="barra">
+    <a class="autor" href="https://github.com/ricardoCordova979">Ricardo José Córdova Soriano</a>
+    <nav aria-label="Secciones">
+      <a href="#hallazgos">Hallazgos</a>
+      <a href="#modelo">Modelos</a>
+      <a href="#replicacion">R y Python</a>
+      <a href="#documentos">Documentos</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="portada">
+      <div>
+        <h1>Qué predice que una persona tenga hijos</h1>
+        <p class="entradilla">Un modelo de clasificación que estima la probabilidad de tener hijos a partir del perfil sociodemográfico de 2,035 personas encuestadas en Estados Unidos. Combina regresión logística, selección de variables y regularización, y el análisis completo se replicó de R a Python.</p>
+        <ul class="datos">
+          <li><strong>AUC = 0.81</strong> en datos no vistos</li>
+          <li><strong>9 parámetros</strong> de 34 posibles</li>
+          <li><strong>R y Python</strong> con resultados idénticos</li>
+        </ul>
+        <div class="acciones">
+          <a class="boton principal" href="informe-r.html">Leer el informe completo</a>
+          <a class="boton secundario" href="https://github.com/ricardoCordova979/regresion-logistica-paternidad">Ver el código</a>
+        </div>
+      </div>
+      <figure class="mapa">
+        <img src="img/curvas.png" alt="Probabilidad estimada de tener hijos según la edad para cada estado civil: las personas casadas parten de un 70 % a los 20 años y llegan al 95 % a los 80; las solteras parten de un 23 % y llegan al 69 %." width="1200" height="900">
+        <figcaption>Probabilidad estimada por el modelo según la edad y el estado civil, promediando el resto del perfil. A los 30 años, la probabilidad de una persona casada (77 %) más que duplica la de una soltera (31 %).</figcaption>
+      </figure>
+    </div>
+
+    <section id="hallazgos">
+      <h2>Qué pesa en la probabilidad de tener hijos</h2>
+      <p class="intro">Manteniendo constantes las demás variables, el modelo cuantifica el efecto de cada característica sobre las <em>odds</em> de tener hijos (la probabilidad de tenerlos dividida entre la de no tenerlos):</p>
+      <dl class="efectos">
+        <div class="efecto">
+          <dt>−89 %</dt>
+          <dd>de <em>odds</em> para una persona soltera frente a una casada: el estado civil es, con diferencia, el factor dominante.</dd>
+        </div>
+        <div class="efecto">
+          <dt>× 1.42</dt>
+          <dd>se multiplican las <em>odds</em> por cada diez años adicionales de edad.</dd>
+        </div>
+        <div class="efecto">
+          <dt>−50 %</dt>
+          <dd>de <em>odds</em> para los hombres frente a las mujeres, que declaran tener hijos con más frecuencia.</dd>
+        </div>
+      </dl>
+      <p class="nota">Odds ratios del modelo logístico seleccionado por BIC. La raza y la clase social completan el modelo; la felicidad, la política, la región y el signo del zodiaco no aportan información.</p>
+    </section>
+
+    <section id="modelo">
+      <h2>Cuatro modelos, una elección por parsimonia</h2>
+      <p class="intro">Seis combinaciones de <em>stepwise</em>, <em>forward</em> y <em>backward</em> con AIC y BIC convergieron en solo dos modelos. Se compararon con validación cruzada repetida (5 folds × 20 repeticiones), frente a un modelo de referencia de tres variables y a un LASSO ajustado por validación cruzada, y luego se evaluaron en un 20 % de datos reservado.</p>
+      <div class="modelo-grid">
+        <div class="tabla-contenedor">
+          <table>
+            <thead>
+              <tr><th scope="col">Modelo</th><th scope="col">Parámetros</th><th scope="col">AUC</th><th scope="col">Kappa</th><th scope="col">Sensibilidad</th><th scope="col">Especificidad</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Referencia: estado civil, edad y raza</td><td>6</td><td>0.799</td><td>0.516</td><td>83.6 %</td><td>69.9 %</td></tr>
+              <tr class="recomendado"><td>Logístico BIC <span class="etiqueta">Recomendado</span></td><td>9</td><td>0.813</td><td>0.535</td><td>82.9 %</td><td>73.5 %</td></tr>
+              <tr><td>Logístico AIC</td><td>19</td><td>0.816</td><td>0.544</td><td>81.6 %</td><td>77.0 %</td></tr>
+              <tr><td>LASSO: solo estado civil y edad</td><td>3</td><td>0.789</td><td>0.503</td><td>84.3 %</td><td>67.3 %</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <img class="roc" src="img/roc.png" alt="Curvas ROC en el conjunto de prueba del modelo logístico BIC y del modelo LASSO de dos variables; ambas curvas están muy próximas, con la del modelo BIC ligeramente por encima." width="920" height="920">
+      </div>
+      <p class="nota">Métricas en el conjunto de prueba, con umbral de clasificación igual a la prevalencia (0.72). El modelo AIC añade 10 parámetros para ganar 0.003 de AUC, una diferencia muy inferior a la variabilidad entre remuestreos; por eso se elige el modelo BIC. El signo del zodiaco, incluido como control, no fue seleccionado por ningún método.</p>
+    </section>
+
+    <section id="proceso">
+      <h2>Cómo se hizo</h2>
+      <p class="intro">El análisis sigue el flujo completo de un proyecto de clasificación.</p>
+      <ol class="pasos">
+        <li><h3>Exploración</h3><p>Perfil de las 2,035 personas y detección del desbalance de clases (72 % con hijos).</p></li>
+        <li><h3>Selección de variables</h3><p>Stepwise, forward y backward con AIC y BIC sobre 12 predictores.</p></li>
+        <li><h3>Validación cruzada</h3><p>5 folds × 20 repeticiones: 100 estimaciones de AUC, Kappa y accuracy por modelo.</p></li>
+        <li><h3>Interpretación</h3><p>ANOVA de tipo II y odds ratios con intervalos de confianza al 95 %.</p></li>
+        <li><h3>Regularización</h3><p>LASSO, Ridge y Elastic Net, con búsqueda conjunta de α y λ y la regla 1-SE.</p></li>
+        <li><h3>Evaluación en prueba</h3><p>Matriz de confusión, sensibilidad, especificidad y curvas ROC con umbral ajustado.</p></li>
+      </ol>
+    </section>
+  </main>
+</div>
+
+<section id="replicacion" class="replica">
+  <div class="envoltura">
+    <h2>Dos lenguajes, un mismo resultado</h2>
+    <p class="intro">Python no tiene equivalentes directos de <code style="color:inherit">step()</code>, de las particiones de <code style="color:inherit">caret</code> ni de <code style="color:inherit">glmnet</code>. Se reimplementaron desde cero, junto con el generador aleatorio de R, hasta reproducir cada partición, cada fold y cada modelo.</p>
+    <div class="cifras-replica">
+      <div><strong>37 de 37</strong>comparaciones superadas</div>
+      <div><strong>51,860</strong>valores contrastados</div>
+      <div><strong>32,580</strong>índices de folds idénticos</div>
+    </div>
+    <div class="acciones">
+      <a class="boton secundario" href="verificacion.html">Ver el informe de verificación</a>
+    </div>
+  </div>
+</section>
+
+<div class="envoltura">
+  <section id="documentos">
+    <h2>Documentos del proyecto</h2>
+    <ul class="documentos">
+      <li><a href="informe-r.html">Informe completo en R</a><span>HTML interactivo</span></li>
+      <li><a href="informe-python.html">Informe completo en Python</a><span>Notebook ejecutado</span></li>
+      <li><a href="pdf/02_Regresion_Logistica_DatosGSS_R.pdf">Informe en R</a><span>PDF, 21 páginas</span></li>
+      <li><a href="pdf/02_Regresion_Logistica_DatosGSS_Python.pdf">Informe en Python</a><span>PDF, 22 páginas</span></li>
+      <li><a href="verificacion.html">Verificación R frente a Python</a><span>HTML, 37 comparaciones</span></li>
+      <li><a href="https://github.com/ricardoCordova979/regresion-logistica-paternidad">Código fuente y datos</a><span>Repositorio en GitHub</span></li>
+    </ul>
+  </section>
+
+  <footer>
+    <p><strong>Ricardo José Córdova Soriano</strong>, análisis estadístico y ciencia de datos con R y Python.</p>
+    <p>Herramientas: R (caret, car, pROC, glmnet, ggplot2, gt) y Python (statsmodels, pandas, matplotlib, great_tables).</p>
+    <p><a href="https://github.com/ricardoCordova979">Otros proyectos en GitHub</a></p>
+  </footer>
+</div>
+</body>
+</html>

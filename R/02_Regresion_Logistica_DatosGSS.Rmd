@@ -1,0 +1,596 @@
+---
+title: "Perfil sociodemográfico de la paternidad: clasificación con regresión logística y regularización"
+subtitle: "Portafolio de Ciencia de Datos · Proyecto 2 · Implementación en R"
+author: "Ricardo José Córdova Soriano"
+date: "Septiembre 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", out.width = "90%",
+  fig.width = 8, fig.height = 4.5, dpi = 150
+)
+```
+
+# Objetivo y enfoque
+
+Este proyecto construye un **modelo de clasificación que estima la probabilidad de que una persona tenga hijos** a partir de su perfil sociodemográfico: edad, estado civil, género, raza, clase social, empleo, ingresos, región y preferencias políticas. Los datos provienen de la *General Social Survey* (GSS) de Estados Unidos.
+
+El análisis responde a tres preguntas:
+
+1. **¿Qué variables explican realmente la paternidad?** Se aplican métodos automáticos de selección de variables (*stepwise*, *forward* y *backward*) con dos criterios de información (AIC y BIC).
+2. **¿Qué modelo generaliza mejor?** Se comparan los candidatos con validación cruzada repetida (5 *folds* × 20 repeticiones) y se evalúan en un conjunto de prueba independiente.
+3. **¿Se puede lograr un modelo más simple con igual capacidad predictiva?** Se aplican modelos regularizados (LASSO, Ridge y Elastic Net) y se ajustan sus hiperparámetros mediante validación cruzada.
+
+El análisis completo se replicó en Python, y los resultados de ambas implementaciones coinciden numéricamente (ver el informe de verificación del proyecto).
+
+# 1. Configuración del entorno
+
+```{r paquetes}
+library(caret)     # partición, validación cruzada y métricas de clasificación
+library(car)       # ANOVA de tipo II
+library(pROC)      # curvas ROC y AUC
+library(glmnet)    # modelos regularizados (LASSO, Ridge, Elastic Net)
+library(dplyr)     # manipulación de datos
+library(tidyr)     # reestructuración de tablas
+library(purrr)     # iteración funcional
+library(ggplot2)   # visualización
+library(gt)        # tablas HTML
+```
+
+Se definen funciones auxiliares para dar un formato homogéneo a tablas, gráficos y métricas.
+
+```{r auxiliares}
+col_principal <- "#1F4E79"
+col_acento    <- "#C55A11"
+col_gris      <- "#8A99A6"
+paleta_modelos <- c("#8A99A6", "#1F4E79", "#C55A11", "#2E7D32")
+theme_set(theme_minimal(base_size = 12) +
+            theme(plot.title = element_text(face = "bold"),
+                  plot.subtitle = element_text(colour = "grey35"),
+                  panel.grid.minor = element_blank()))
+
+# Tabla gt con estilo común
+tabla <- function(df, titulo, subtitulo = NULL, nota = NULL) {
+  t <- gt(df) |>
+    tab_header(title = titulo, subtitle = subtitulo) |>
+    opt_stylize(style = 6, color = "blue") |>
+    tab_options(table.font.size = px(13), heading.title.font.size = px(16))
+  if (!is.null(nota)) t <- tab_source_note(t, nota)
+  t
+}
+
+fmt_p     <- function(p) ifelse(p < 0.001, "< 0.001", formatC(p, format = "f", digits = 4))
+estrellas <- function(p) as.character(cut(p, c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),
+                                          labels = c("***", "**", "*", ".", ""), right = FALSE))
+num <- function(x, d = 3) formatC(x, format = "f", digits = d, big.mark = ",")
+pct <- function(x, d = 1) paste0(formatC(100 * x, format = "f", digits = d), " %")
+
+# Métricas de clasificación en un conjunto de datos, dado un umbral de probabilidad
+metricas_clasif <- function(prob, obs, umbral) {
+  pred <- factor(ifelse(prob >= umbral, "Si", "No"), levels = c("No", "Si"))
+  cm <- confusionMatrix(pred, obs, positive = "Si")
+  c(AUC = as.numeric(auc(obs, prob, levels = c("No", "Si"), direction = "<")),
+    Accuracy = unname(cm$overall["Accuracy"]), Kappa = unname(cm$overall["Kappa"]),
+    Sensibilidad = unname(cm$byClass["Sensitivity"]),
+    Especificidad = unname(cm$byClass["Specificity"]))
+}
+```
+
+# 2. Datos
+
+```{r carga}
+datos <- readRDS("../datos/DatosGSS")
+str(datos)
+```
+
+```{r diccionario}
+diccionario <- data.frame(
+  Variable = names(datos),
+  Tipo = ifelse(sapply(datos, is.factor),
+                paste0("Categórica (", sapply(datos, nlevels), " niveles)"), "Numérica"),
+  Descripción = c("Clase social autopercibida",
+                  "Nivel de felicidad declarado",
+                  "Afiliación política",
+                  "Tamaño de la localidad de residencia (miles de habitantes)",
+                  "Región de Estados Unidos",
+                  "Nivel de ingresos (codificado 0, 1, 2)",
+                  "Raza",
+                  "Género",
+                  "Edad (años)",
+                  "Tiene al menos un hijo — variable objetivo",
+                  "Estado civil",
+                  "Situación laboral",
+                  "Signo del zodiaco (variable de control sin relación esperada)"),
+  row.names = NULL)
+tabla(diccionario, "Diccionario de variables",
+      paste(format(nrow(datos), big.mark = ","), "personas encuestadas ·", ncol(datos),
+            "variables ·", sum(is.na(datos)), "valores faltantes"))
+```
+
+La variable objetivo `Hijos` se recodifica con etiquetas descriptivas (`No`/`Si`). `caret` requiere que los niveles sean nombres válidos de R para calcular probabilidades de clase.
+
+```{r recodificacion}
+datos$Hijos <- factor(datos$Hijos, levels = c("0", "1"), labels = c("No", "Si"))
+
+data.frame(Hijos = levels(datos$Hijos), Personas = as.integer(table(datos$Hijos)),
+           Proporción = as.numeric(prop.table(table(datos$Hijos)))) |>
+  tabla("Distribución de la variable objetivo") |>
+  fmt_percent(columns = Proporción, decimals = 1) |>
+  fmt_number(columns = Personas, decimals = 0)
+```
+
+El `r pct(mean(datos$Hijos == "Si"))` de las personas encuestadas tiene hijos. La clase positiva es mayoritaria, así que un clasificador trivial que siempre prediga "Sí" acertaría en ese mismo porcentaje de casos. Por eso la exactitud (*accuracy*) no basta para evaluar los modelos, y se usan también el **AUC** y el **índice Kappa**, que descuentan el acierto atribuible al azar.
+
+## Análisis exploratorio
+
+```{r exploratorio, fig.height = 6}
+exploracion <- datos |>
+  mutate(Edad = cut(Edad, c(17, 29, 39, 49, 59, 69, Inf),
+                    labels = c("18–29", "30–39", "40–49", "50–59", "60–69", "70+"))) |>
+  select(Hijos, Edad, EstadoCivil, Genero, Raza, ClaseSocial) |>
+  mutate(across(-Hijos, as.character)) |>
+  pivot_longer(-Hijos, names_to = "Variable", values_to = "Categoria") |>
+  group_by(Variable, Categoria) |>
+  summarise(Proporcion = mean(Hijos == "Si"), n = n(), .groups = "drop") |>
+  mutate(Variable = factor(Variable, levels = c("Edad", "EstadoCivil", "Genero",
+                                                "Raza", "ClaseSocial")))
+
+ggplot(exploracion, aes(Categoria, Proporcion)) +
+  geom_col(fill = col_principal, width = 0.7) +
+  geom_hline(yintercept = mean(datos$Hijos == "Si"), colour = col_acento,
+             linetype = "dashed", linewidth = 0.8) +
+  facet_wrap(~ Variable, scales = "free_x", ncol = 3) +
+  scale_y_continuous(labels = function(x) paste0(100 * x, " %"), limits = c(0, 1)) +
+  labs(title = "Proporción de personas con hijos según su perfil",
+       subtitle = "La línea discontinua marca la proporción global",
+       x = NULL, y = "Personas con hijos") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+La edad y el estado civil muestran las diferencias más marcadas: la proporción de personas con hijos crece con la edad, y las personas solteras tienen hijos con mucha menor frecuencia que las casadas o las que alguna vez lo estuvieron. El género y la raza muestran diferencias menores.
+
+# 3. Partición entrenamiento–prueba
+
+Se reserva el 80 % de las observaciones para entrenamiento. `createDataPartition()` estratifica por la variable objetivo, de modo que ambos conjuntos conservan la proporción de personas con hijos.
+
+```{r particion}
+set.seed(12345)
+trainIndex <- createDataPartition(datos$Hijos, p = 0.8, list = FALSE)
+data_train <- datos[trainIndex, ]
+data_test  <- datos[-trainIndex, ]
+
+data.frame(Conjunto = c("Entrenamiento", "Prueba"),
+           Observaciones = c(nrow(data_train), nrow(data_test)),
+           `Con hijos` = c(mean(data_train$Hijos == "Si"), mean(data_test$Hijos == "Si")),
+           check.names = FALSE) |>
+  tabla("Resumen de la partición 80/20", "Semilla 12345") |>
+  fmt_percent(columns = `Con hijos`, decimals = 1)
+```
+
+# 4. Selección automática de variables
+
+Se parte de dos modelos de referencia: el modelo nulo (solo intercepto) y el modelo completo (las 12 variables predictoras). Entre ellos, `step()` busca el mejor subconjunto de variables con tres estrategias (*stepwise*, *forward* y *backward*) y dos criterios de información:
+
+- **AIC** (criterio de Akaike): penaliza cada parámetro adicional con 2 unidades.
+- **BIC** (criterio bayesiano): penaliza cada parámetro con log(n) = `r num(log(nrow(data_train)), 2)` unidades, lo que favorece modelos más simples.
+
+```{r seleccion}
+nulo     <- glm(Hijos ~ 1, data = data_train, family = binomial)
+completo <- glm(Hijos ~ ., data = data_train, family = binomial)
+k_bic    <- log(nrow(data_train))
+alcance  <- list(lower = nulo, upper = completo)
+
+modeloStepBIC <- step(nulo, scope = alcance, direction = "both",     k = k_bic, trace = FALSE)
+modeloStepAIC <- step(nulo, scope = alcance, direction = "both",     k = 2,     trace = FALSE)
+modeloForwBIC <- step(nulo, scope = alcance, direction = "forward",  k = k_bic, trace = FALSE)
+modeloForwAIC <- step(nulo, scope = alcance, direction = "forward",  k = 2,     trace = FALSE)
+modeloBackBIC <- step(completo, scope = alcance, direction = "backward", k = k_bic, trace = FALSE)
+modeloBackAIC <- step(completo, scope = alcance, direction = "backward", k = 2,     trace = FALSE)
+```
+
+```{r tabla-seleccion}
+seleccionados <- list(
+  "Stepwise · BIC" = modeloStepBIC, "Forward · BIC" = modeloForwBIC,
+  "Backward · BIC" = modeloBackBIC, "Stepwise · AIC" = modeloStepAIC,
+  "Forward · AIC" = modeloForwAIC, "Backward · AIC" = modeloBackAIC)
+
+variables_modelo <- function(m) paste(sort(attr(terms(m), "term.labels")), collapse = ", ")
+resumen_seleccion <- data.frame(
+  Método = names(seleccionados),
+  Parámetros = sapply(seleccionados, function(m) m$rank),
+  Variables = sapply(seleccionados, variables_modelo),
+  AIC = sapply(seleccionados, AIC), BIC = sapply(seleccionados, BIC),
+  row.names = NULL)
+tabla(resumen_seleccion, "Modelos obtenidos por selección automática",
+      "Variables en orden alfabético") |>
+  fmt_number(columns = c(AIC, BIC), decimals = 1)
+```
+
+Las seis combinaciones producen **solo `r length(unique(resumen_seleccion$Variables))` modelos distintos**: las tres estrategias de búsqueda convergen a la misma solución para cada criterio. Las diferencias se deben exclusivamente al criterio:
+
+- **BIC** selecciona `r length(attr(terms(modeloStepBIC), "term.labels"))` variables (**`r modeloStepBIC$rank` parámetros**): estado civil, edad, género, raza y clase social.
+- **AIC**, con una penalización menor, incorpora además `r paste(setdiff(attr(terms(modeloStepAIC), "term.labels"), attr(terms(modeloStepBIC), "term.labels")), collapse = ", ")` (**`r modeloStepAIC$rank` parámetros**). Las variables categóricas aportan un parámetro por cada nivel distinto del de referencia, lo que eleva rápidamente el número total.
+
+Ninguno de los dos criterios selecciona el **signo del zodiaco**, que funciona como control: una variable sin relación plausible con la paternidad debe quedar excluida, y así ocurre.
+
+# 5. Comparación por validación cruzada repetida
+
+Se comparan tres candidatos: el modelo BIC, el modelo AIC y un **modelo de referencia basado en conocimiento del dominio**, con tres variables (estado civil, edad y raza). Cada modelo se evalúa con validación cruzada de 5 *folds* repetida 20 veces (100 estimaciones por métrica), usando la misma partición en todos para una comparación justa.
+
+```{r validacion-cruzada}
+modeloManual <- glm(Hijos ~ EstadoCivil + Edad + Raza, data = data_train, family = binomial)
+candidatos <- list(modeloManual, modeloStepBIC, modeloStepAIC)
+names(candidatos) <- c(paste0("Referencia (", modeloManual$rank, " parám.)"),
+                       paste0("BIC (", modeloStepBIC$rank, " parám.)"),
+                       paste0("AIC (", modeloStepAIC$rank, " parám.)"))
+
+control_vc <- trainControl(method = "repeatedcv", number = 5, repeats = 20,
+                           summaryFunction = multiClassSummary,
+                           classProbs = TRUE, savePredictions = TRUE)
+vcrTodosModelos <- map(candidatos, function(m) {
+  set.seed(12345)
+  train(formula(m), data = data_train, method = "glm", family = "binomial",
+        trControl = control_vc)
+})
+```
+
+```{r boxplots-vc, fig.height = 4.2}
+remuestreos <- imap_dfr(vcrTodosModelos, function(v, nombre) {
+  v$resample |> select(AUC, Kappa, Accuracy, Resample) |> mutate(Modelo = nombre)
+}) |>
+  pivot_longer(c(AUC, Kappa, Accuracy), names_to = "Métrica", values_to = "Valor") |>
+  mutate(Modelo = factor(Modelo, levels = names(candidatos)),
+         Métrica = factor(Métrica, levels = c("AUC", "Kappa", "Accuracy")))
+
+ggplot(remuestreos, aes(Modelo, Valor, fill = Modelo)) +
+  geom_boxplot(width = 0.6, outlier.size = 1, alpha = 0.9, colour = "grey25") +
+  facet_wrap(~ Métrica, scales = "free_y") +
+  scale_fill_manual(values = paleta_modelos[1:3]) +
+  labs(title = "Desempeño en validación cruzada repetida (5 folds × 20 repeticiones)",
+       subtitle = "Cada caja resume 100 estimaciones fuera de muestra", x = NULL, y = NULL) +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+```{r resumen-vc}
+resumen_vc <- remuestreos |>
+  group_by(Modelo, Métrica) |>
+  summarise(Media = mean(Valor), `Desv. est.` = sd(Valor), Mínimo = min(Valor),
+            Mediana = median(Valor), Máximo = max(Valor), .groups = "drop") |>
+  arrange(Métrica, Modelo)
+tabla(resumen_vc, "Resumen de la validación cruzada repetida") |>
+  fmt_number(columns = -c(Modelo, Métrica), decimals = 4)
+```
+
+```{r medias-vc, include=FALSE}
+media_vc <- function(modelo, metrica) {
+  resumen_vc$Media[resumen_vc$Modelo == names(candidatos)[modelo] & resumen_vc$Métrica == metrica]
+}
+sd_auc_bic <- resumen_vc$`Desv. est.`[resumen_vc$Modelo == names(candidatos)[2] &
+                                        resumen_vc$Métrica == "AUC"]
+```
+
+El modelo AIC obtiene el mejor AUC medio (`r num(media_vc(3, "AUC"), 4)`), seguido del modelo BIC (`r num(media_vc(2, "AUC"), 4)`) y del de referencia (`r num(media_vc(1, "AUC"), 4)`). Sin embargo, la ventaja del modelo AIC sobre el BIC (`r num(media_vc(3, "AUC") - media_vc(2, "AUC"), 4)`) es muy inferior a la variabilidad entre remuestreos (desviación estándar de `r num(sd_auc_bic, 4)`), y en Kappa y *accuracy* las diferencias son prácticamente nulas.
+
+Siguiendo el **principio de parsimonia**, se elige el **modelo BIC**: logra un desempeño equivalente con `r modeloStepBIC$rank` parámetros frente a `r modeloStepAIC$rank`, lo que lo hace más interpretable y menos propenso al sobreajuste.
+
+# 6. Evaluación en el conjunto de prueba
+
+El umbral de clasificación por defecto (0.5) no es adecuado cuando las clases están desbalanceadas: clasificaría a casi todas las personas como "con hijos". Se usa como umbral la **proporción de personas con hijos en entrenamiento** (`r num(mean(data_train$Hijos == "Si"), 4)`), que equilibra sensibilidad y especificidad.
+
+```{r umbral}
+umbral <- mean(data_train$Hijos == "Si")
+probs_test <- predict(modeloStepBIC, data_test, type = "response")
+pred_test  <- factor(ifelse(probs_test >= umbral, "Si", "No"), levels = c("No", "Si"))
+cm_test    <- confusionMatrix(pred_test, data_test$Hijos, positive = "Si")
+
+as.data.frame.matrix(cm_test$table) |>
+  mutate(Predicción = c("No", "Sí"), .before = 1) |>
+  tabla("Matriz de confusión · Modelo BIC en prueba", "Columnas: clase observada") |>
+  cols_label(No = "Observado: No", Si = "Observado: Sí")
+```
+
+```{r metricas-prueba}
+prob_prueba <- map(candidatos, predict, newdata = data_test, type = "response")
+metricas_prueba <- imap_dfr(prob_prueba, function(p, nombre) {
+  as.data.frame(t(metricas_clasif(p, data_test$Hijos, umbral))) |> mutate(Modelo = nombre, .before = 1)
+})
+tabla(metricas_prueba, "Métricas en el conjunto de prueba",
+      paste("Umbral de clasificación =", num(umbral, 4))) |>
+  fmt_number(columns = -Modelo, decimals = 4) |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_body(rows = 2))
+```
+
+```{r curvas-roc}
+curvas_roc <- imap_dfr(prob_prueba, function(p, nombre) {
+  r <- roc(data_test$Hijos, p, levels = c("No", "Si"), direction = "<")
+  data.frame(Modelo = nombre, fpr = 1 - r$specificities, tpr = r$sensitivities)
+}) |> mutate(Modelo = factor(Modelo, levels = names(candidatos)))
+
+ggplot(curvas_roc, aes(fpr, tpr, colour = Modelo)) +
+  geom_abline(linetype = "dotted", colour = "grey50") +
+  geom_path(linewidth = 0.9) +
+  scale_colour_manual(values = paleta_modelos[1:3]) +
+  coord_equal() +
+  labs(title = "Curvas ROC en el conjunto de prueba",
+       x = "Tasa de falsos positivos (1 − especificidad)",
+       y = "Tasa de verdaderos positivos (sensibilidad)", colour = NULL) +
+  theme(legend.position = c(0.72, 0.2))
+```
+
+En datos no vistos, el modelo BIC alcanza un **AUC de `r num(metricas_prueba$AUC[2], 3)`**. Clasifica correctamente al `r pct(metricas_prueba$Accuracy[2])` de las personas, con una sensibilidad del `r pct(metricas_prueba$Sensibilidad[2])` (personas con hijos identificadas) y una especificidad del `r pct(metricas_prueba$Especificidad[2])` (personas sin hijos identificadas). El índice Kappa de `r num(metricas_prueba$Kappa[2], 3)` indica un acuerdo moderado más allá del azar. Las curvas ROC de los tres modelos son casi indistinguibles, lo que confirma que el estado civil, la edad y la raza concentran la mayor parte de la información predictiva.
+
+# 7. Interpretación del modelo seleccionado
+
+## Importancia de las variables (ANOVA de tipo II)
+
+```{r anova2}
+anova2 <- Anova(modeloStepBIC, type = "II")
+data.frame(Variable = rownames(anova2), `Estadístico LR (χ²)` = anova2$`LR Chisq`,
+           gl = anova2$Df, `p-valor` = fmt_p(anova2$`Pr(>Chisq)`),
+           Sig. = estrellas(anova2$`Pr(>Chisq)`), check.names = FALSE, row.names = NULL) |>
+  arrange(desc(`Estadístico LR (χ²)`)) |>
+  tabla("ANOVA de tipo II · Modelo BIC", "Prueba de razón de verosimilitudes por variable") |>
+  fmt_number(columns = `Estadístico LR (χ²)`, decimals = 2) |>
+  cols_align("center", columns = c(`p-valor`, Sig.))
+```
+
+Las cinco variables son significativas. El **estado civil** es, con gran diferencia, la más importante, seguido de la edad. Una advertencia metodológica: como las variables se eligieron con los mismos datos, estos p-valores tienden a ser optimistas. Deben leerse como una medida de importancia relativa, no como pruebas de hipótesis formales.
+
+## Odds ratios
+
+```{r odds-ratios}
+cf <- summary(modeloStepBIC)$coefficients
+ic <- confint.default(modeloStepBIC)
+odds <- data.frame(Término = rownames(cf), Coeficiente = cf[, 1], `Error estándar` = cf[, 2],
+                   `Odds ratio` = exp(cf[, 1]), `IC 95 % inf.` = exp(ic[, 1]),
+                   `IC 95 % sup.` = exp(ic[, 2]), `p-valor` = fmt_p(cf[, 4]),
+                   Sig. = estrellas(cf[, 4]), check.names = FALSE, row.names = NULL)
+tabla(odds, "Coeficientes y odds ratios · Modelo BIC",
+      nota = "Intervalos de confianza de Wald al 95 %. Significancia: *** p<0.001, ** p<0.01, * p<0.05, . p<0.1") |>
+  fmt_number(columns = c(Coeficiente, `Error estándar`), decimals = 4) |>
+  fmt_number(columns = c(`Odds ratio`, `IC 95 % inf.`, `IC 95 % sup.`), decimals = 3) |>
+  cols_align("center", columns = c(`p-valor`, Sig.))
+```
+
+```{r forest-plot, fig.height = 4}
+odds |>
+  filter(Término != "(Intercept)") |>
+  mutate(Término = factor(Término, levels = rev(Término)),
+         Efecto = ifelse(`Odds ratio` > 1, "Aumenta las odds", "Reduce las odds")) |>
+  ggplot(aes(`Odds ratio`, Término, colour = Efecto)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(aes(xmin = `IC 95 % inf.`, xmax = `IC 95 % sup.`), height = 0.25, linewidth = 0.8) +
+  geom_point(size = 2.8) +
+  scale_x_log10() +
+  scale_colour_manual(values = c("Aumenta las odds" = col_acento, "Reduce las odds" = col_principal)) +
+  labs(title = "Odds ratios del modelo BIC con intervalos de confianza al 95 %",
+       subtitle = "Escala logarítmica · la línea discontinua (OR = 1) indica ausencia de efecto",
+       x = "Odds ratio", y = NULL, colour = NULL) +
+  theme(legend.position = "top")
+```
+
+Un *odds ratio* (OR) compara las *odds* (probabilidad de tener hijos dividida entre la probabilidad de no tenerlos) de una categoría con las de su categoría de referencia, **manteniendo constantes las demás variables**:
+
+- **Estado civil.** Las *odds* de tener hijos de una persona soltera son `r num(odds$"Odds ratio"[3], 3)` veces las de una persona casada, es decir, un `r pct(1 - odds$"Odds ratio"[3], 0)` menores. Las personas divorciadas, separadas o viudas no difieren significativamente de las casadas (p = `r num(cf[2, 4], 3)`), lo que refleja que la mayoría tuvo hijos durante su matrimonio.
+- **Edad.** Cada año adicional multiplica las *odds* por `r num(odds$"Odds ratio"[4], 4)`, un aumento del `r pct(odds$"Odds ratio"[4] - 1, 1)` anual. Diez años más de edad equivalen a multiplicar las *odds* por `r num(exp(10 * cf[4, 1]), 2)`.
+- **Género.** Los hombres declaran tener hijos con *odds* un `r pct(1 - odds$"Odds ratio"[5], 0)` menores que las mujeres (OR = `r num(odds$"Odds ratio"[5], 3)`).
+- **Raza.** Frente a las personas de raza negra (referencia), las *odds* son un `r pct(1 - odds$"Odds ratio"[7], 0)` menores para las personas blancas y un `r pct(1 - odds$"Odds ratio"[6], 0)` menores para otras razas.
+- **Clase social.** Solo la clase media-alta se diferencia significativamente de la clase baja, con *odds* un `r pct(1 - odds$"Odds ratio"[9], 0)` menores.
+
+# 8. Modelos regularizados
+
+La regularización añade a la función de verosimilitud una penalización sobre el tamaño de los coeficientes, controlada por el parámetro λ. El parámetro α define el tipo de penalización:
+
+- **Ridge (α = 0):** penalización cuadrática. Reduce los coeficientes hacia cero, pero nunca los anula; útil ante predictores correlacionados.
+- **LASSO (α = 1):** penalización en valor absoluto. Anula coeficientes y, por tanto, **selecciona variables**.
+- **Elastic Net (0 < α < 1):** combina ambos efectos.
+
+`glmnet` estandariza las variables internamente, de modo que la penalización afecta a todas por igual, pero devuelve los coeficientes en su escala original. Se fija una tolerancia de convergencia estricta (`thresh = 1e-14`, frente a 1e-7 por defecto) para obtener soluciones numéricamente precisas y reproducibles en cualquier implementación.
+
+```{r trayectorias, fig.height = 4.6}
+x <- model.matrix(Hijos ~ ., data = data_train)[, -1]
+y <- data_train$Hijos
+tol <- 1e-14   # tolerancia de convergencia de glmnet
+
+modeloLASSO <- glmnet(x, y, alpha = 1,   family = "binomial", thresh = tol)
+modeloRIDGE <- glmnet(x, y, alpha = 0,   family = "binomial", thresh = tol)
+modeloENET  <- glmnet(x, y, alpha = 0.1, family = "binomial", thresh = tol)
+
+destacados <- c("EstadoCivilSoltero", "GeneroMale", "RazaWhite", "Edad")
+trayectorias <- imap_dfr(list(`LASSO (α = 1)` = modeloLASSO, `Elastic Net (α = 0.1)` = modeloENET,
+                              `Ridge (α = 0)` = modeloRIDGE), function(m, nombre) {
+  b <- as.matrix(m$beta)
+  data.frame(Modelo = nombre, Coeficiente = rep(rownames(b), ncol(b)),
+             log_lambda = rep(log(m$lambda), each = nrow(b)), Valor = as.vector(b))
+}) |>
+  mutate(Modelo = factor(Modelo, levels = c("LASSO (α = 1)", "Elastic Net (α = 0.1)", "Ridge (α = 0)")),
+         Grupo = ifelse(Coeficiente %in% destacados, Coeficiente, "Resto de coeficientes"),
+         Grupo = factor(Grupo, levels = c(destacados, "Resto de coeficientes")))
+
+ggplot(trayectorias, aes(log_lambda, Valor, group = Coeficiente, colour = Grupo)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(data = ~ filter(.x, Grupo == "Resto de coeficientes"), linewidth = 0.4) +
+  geom_line(data = ~ filter(.x, Grupo != "Resto de coeficientes"), linewidth = 0.9) +
+  facet_wrap(~ Modelo, scales = "free_x") +
+  coord_cartesian(ylim = c(-3, 3)) +
+  scale_colour_manual(values = c(col_acento, col_principal, "#2E7D32", "#7B1FA2", "grey75")) +
+  labs(title = "Trayectorias de los coeficientes según la penalización",
+       subtitle = "La penalización aumenta hacia la derecha",
+       x = expression(log(lambda)), y = "Coeficiente", colour = NULL) +
+  theme(legend.position = "bottom")
+```
+
+En los tres casos, los coeficientes se contraen hacia cero a medida que aumenta la penalización, pero de forma distinta:
+
+- **LASSO** anula los coeficientes de uno en uno. La mayoría desaparece pronto, y las últimas en salir son las más informativas (ser soltero, la edad y el género), lo que coincide con el análisis anterior.
+- **Ridge** reduce todos los coeficientes de forma gradual y simultánea, sin anular ninguno. Por eso conserva siempre todos los parámetros.
+- **Elastic Net** con α = 0.1 muestra un comportamiento intermedio.
+
+El coeficiente de la edad parece pequeño porque está expresado por año; su importancia es comparable a la de las variables categóricas una vez escalado.
+
+# 9. Ajuste de hiperparámetros por validación cruzada
+
+El valor de λ se elige por validación cruzada de 5 *folds*, maximizando el AUC. Para que la comparación entre distintos valores de α sea justa, **todos los modelos se evalúan con la misma asignación de observaciones a *folds***.
+
+```{r folds}
+set.seed(12345)
+foldid <- sample(rep(1:5, length.out = nrow(x)))
+table(foldid)
+```
+
+## LASSO: elección de λ
+
+```{r cv-lasso}
+cv.lasso <- cv.glmnet(x, y, family = "binomial", alpha = 1, type.measure = "auc",
+                      foldid = foldid, thresh = tol)
+
+data.frame(Criterio = c("λ mínimo (máximo AUC)", "λ 1-SE (regla de un error estándar)"),
+           Lambda = c(cv.lasso$lambda.min, cv.lasso$lambda.1se),
+           `Parámetros no nulos` = cv.lasso$nzero[cv.lasso$index],
+           `AUC medio` = cv.lasso$cvm[cv.lasso$index],
+           `Error estándar` = cv.lasso$cvsd[cv.lasso$index], check.names = FALSE) |>
+  tabla("LASSO · λ seleccionados por validación cruzada") |>
+  fmt_number(columns = c(Lambda, `AUC medio`, `Error estándar`), decimals = 4)
+```
+
+```{r grafico-cv-lasso}
+data.frame(log_lambda = log(cv.lasso$lambda), cvm = cv.lasso$cvm,
+           cvlo = cv.lasso$cvlo, cvup = cv.lasso$cvup) |>
+  ggplot(aes(log_lambda, cvm)) +
+  geom_errorbar(aes(ymin = cvlo, ymax = cvup), colour = "grey70", width = 0) +
+  geom_point(colour = col_principal, size = 1.6) +
+  geom_vline(xintercept = log(c(cv.lasso$lambda.min, cv.lasso$lambda.1se)),
+             linetype = c("dashed", "dotted"), colour = col_acento) +
+  labs(title = "LASSO · AUC de validación cruzada según λ",
+       subtitle = "Discontinua: λ mínimo · punteada: λ 1-SE · barras: ± 1 error estándar",
+       x = expression(log(lambda)), y = "AUC medio (validación cruzada)")
+```
+
+El AUC se mantiene prácticamente constante en un amplio rango de λ y solo cae con las penalizaciones más fuertes. La **regla de un error estándar (1-SE)** elige el λ más grande (el modelo más simple) cuyo AUC está a menos de un error estándar del máximo. Aquí reduce los parámetros no nulos de `r cv.lasso$nzero[cv.lasso$index[1]]` a `r cv.lasso$nzero[cv.lasso$index[2]]`, con una pérdida de AUC de solo `r num(cv.lasso$cvm[cv.lasso$index[1]] - cv.lasso$cvm[cv.lasso$index[2]], 4)`.
+
+## Búsqueda conjunta de α y λ
+
+```{r busqueda-enet}
+alphas <- seq(0, 1, by = 0.1)
+tunningEnet <- map(alphas, function(a) {
+  cv.glmnet(x, y, family = "binomial", alpha = a, type.measure = "auc", foldid = foldid,
+            thresh = tol)
+})
+
+resultado <- map_dfr(seq_along(alphas), function(i) {
+  data.frame(alpha = alphas[i], lambda = tunningEnet[[i]]$lambda,
+             numPar = tunningEnet[[i]]$nzero, auc_cv = tunningEnet[[i]]$cvm,
+             auc_lo = tunningEnet[[i]]$cvlo, posicion = seq_along(tunningEnet[[i]]$lambda))
+})
+
+# Umbral de la regla 1-SE a partir del mejor modelo global
+auc_1se <- resultado |> slice_max(auc_cv, n = 1, with_ties = FALSE) |> pull(auc_lo)
+```
+
+```{r grafico-enet, fig.height = 4.8}
+ggplot(resultado, aes(posicion, auc_cv, colour = alpha, group = alpha)) +
+  geom_line(linewidth = 0.6) +
+  geom_hline(yintercept = auc_1se, colour = col_acento, linetype = "dashed", linewidth = 0.8) +
+  scale_colour_gradient(low = "#BFD1E3", high = "#0B2A45", breaks = seq(0, 1, 0.2)) +
+  labs(title = "AUC de validación cruzada para cada combinación de α y λ",
+       subtitle = "Posición: índice de λ, de mayor a menor penalización · línea discontinua: umbral 1-SE",
+       x = "Posición en la secuencia de λ", y = "AUC medio (validación cruzada)", colour = "α")
+```
+
+La línea discontinua marca el **umbral de la regla 1-SE**: el AUC del mejor modelo menos su error estándar (`r num(auc_1se, 4)`). Cualquier combinación por encima de ella tiene un desempeño estadísticamente equivalente al óptimo. Salvo Ridge (α = 0) y las penalizaciones más fuertes, casi todas las combinaciones superan el umbral, así que se elige la que **use menos parámetros**. La comparación se hace con cuatro decimales, porque diferencias de AUC menores a 0.0001 carecen de relevancia práctica y no deben decidir la selección. En caso de empate, se prefiere el mayor α (más selección de variables) y el mayor λ (más penalización).
+
+```{r seleccion-enet}
+# Se compara con 4 decimales: diferencias de AUC menores a 0.0001 no son relevantes
+candidatos_1se <- resultado |>
+  filter(round(auc_cv, 4) >= round(auc_1se, 4)) |>
+  slice_min(numPar) |>
+  arrange(desc(alpha), desc(lambda))
+
+candidatos_1se |>
+  head(8) |>
+  tabla("Combinaciones con el menor número de parámetros sobre el umbral 1-SE",
+        "Se muestran las 8 primeras; la primera fila es la seleccionada") |>
+  fmt_number(columns = c(lambda, auc_cv, auc_lo), decimals = 4) |>
+  cols_label(alpha = "α", lambda = "λ", numPar = "Parámetros no nulos", auc_cv = "AUC medio",
+             auc_lo = "AUC − 1 EE", posicion = "Posición") |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_body(rows = 1))
+```
+
+## Modelo regularizado definitivo
+
+```{r modelo-definitivo}
+alpha_opt  <- candidatos_1se$alpha[1]
+lambda_opt <- candidatos_1se$lambda[1]
+modeloEnetDef <- tunningEnet[[match(alpha_opt, alphas)]]$glmnet.fit
+
+coef_def <- as.matrix(coef(modeloEnetDef, s = lambda_opt))
+data.frame(Término = rownames(coef_def), Coeficiente = coef_def[, 1], row.names = NULL) |>
+  filter(Coeficiente != 0) |>
+  mutate(`Odds ratio` = exp(Coeficiente)) |>
+  tabla(paste0("Coeficientes no nulos del modelo regularizado (α = ", alpha_opt,
+               ", λ = ", num(lambda_opt, 4), ")"),
+        nota = "Coeficientes en la escala original de las variables, contraídos por la penalización.") |>
+  fmt_number(columns = c(Coeficiente, `Odds ratio`), decimals = 4)
+```
+
+El modelo definitivo, con **α = `r alpha_opt`** y **λ = `r num(lambda_opt, 4)`**, conserva solo `r sum(coef_def[-1, 1] != 0)` variables con coeficiente no nulo: ser soltero y la edad. Coincide con el λ 1-SE del LASSO de la sección anterior. Los signos concuerdan con los del modelo logístico: ser soltero reduce la probabilidad de tener hijos y la edad la aumenta. Sus magnitudes son menores porque la penalización las contrae hacia cero. Este sesgo deliberado reduce la varianza del modelo, pero implica que los *odds ratios* no deben interpretarse con la misma literalidad que en el modelo sin penalizar.
+
+# 10. Evaluación del modelo regularizado en prueba
+
+```{r prueba-enet}
+x_test <- model.matrix(Hijos ~ ., data = data_test)[, -1]
+probs_test_enet <- as.vector(predict(modeloEnetDef, x_test, s = lambda_opt, type = "response"))
+
+comparacion_final <- rbind(
+  data.frame(Modelo = paste0("Logístico BIC (", modeloStepBIC$rank, " parámetros)"),
+             t(metricas_clasif(probs_test, data_test$Hijos, umbral))),
+  data.frame(Modelo = paste0("Regularizado, α = ", alpha_opt, " (", sum(coef_def != 0),
+                             " parámetros)"),
+             t(metricas_clasif(probs_test_enet, data_test$Hijos, umbral))))
+tabla(comparacion_final, "Modelo logístico vs. modelo regularizado en prueba",
+      paste("Umbral de clasificación =", num(umbral, 4))) |>
+  fmt_number(columns = -Modelo, decimals = 4)
+```
+
+```{r roc-final}
+roc_final <- imap_dfr(list(`Logístico BIC` = probs_test, `Regularizado` = probs_test_enet),
+                      function(p, nombre) {
+  r <- roc(data_test$Hijos, p, levels = c("No", "Si"), direction = "<")
+  data.frame(Modelo = nombre, fpr = 1 - r$specificities, tpr = r$sensitivities)
+})
+ggplot(roc_final, aes(fpr, tpr, colour = Modelo)) +
+  geom_abline(linetype = "dotted", colour = "grey50") +
+  geom_path(linewidth = 0.9) +
+  scale_colour_manual(values = c(col_principal, col_acento)) +
+  coord_equal() +
+  labs(title = "Curvas ROC en prueba: logístico BIC vs. regularizado",
+       x = "Tasa de falsos positivos (1 − especificidad)",
+       y = "Tasa de verdaderos positivos (sensibilidad)", colour = NULL) +
+  theme(legend.position = c(0.72, 0.2))
+```
+
+Con solo dos variables, el modelo regularizado obtiene un AUC de `r num(comparacion_final$AUC[2], 3)` frente a `r num(comparacion_final$AUC[1], 3)` del modelo BIC. Cede algo de capacidad discriminante a cambio de una simplicidad considerable: `r sum(coef_def != 0)` parámetros frente a `r modeloStepBIC$rank`, y sin necesidad de recoger género, raza ni clase social.
+
+# 11. Conclusiones
+
+- **Qué determina la paternidad.** El estado civil es el factor dominante: las *odds* de tener hijos de una persona soltera son un `r pct(1 - odds$"Odds ratio"[3], 0)` menores que las de una casada. Le siguen la edad, el género, la raza y la clase social. Las variables de actitud (felicidad, política), la región y el signo del zodiaco no aportan información.
+- **Modelo recomendado.** El modelo logístico seleccionado por BIC (`r modeloStepBIC$rank` parámetros) ofrece el mejor equilibrio entre precisión e interpretabilidad: AUC de `r num(metricas_prueba$AUC[2], 3)` en prueba, sensibilidad del `r pct(metricas_prueba$Sensibilidad[2])` y especificidad del `r pct(metricas_prueba$Especificidad[2])`.
+- **Alternativa mínima.** Si se requiere un modelo con la menor cantidad de información posible, el modelo regularizado con solo dos variables (estado civil y edad) mantiene un AUC de `r num(comparacion_final$AUC[2], 3)`.
+- **Solidez del proceso.** La selección de variables es estable (las tres estrategias coinciden), el control negativo (zodiaco) queda excluido y las métricas de validación cruzada y de prueba son coherentes entre sí.
+
+**Próximos pasos:** explorar interacciones (por ejemplo, edad × estado civil) y efectos no lineales de la edad mediante *splines*; calibrar las probabilidades estimadas; y elegir el umbral de clasificación según el coste relativo de los falsos positivos y negativos en la aplicación concreta.
+
+# Anexo: entorno de ejecución
+
+```{r session-info}
+sessionInfo()
+```
